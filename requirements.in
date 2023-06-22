@@ -1,0 +1,17 @@
+pygeos
+geojson
+shapely
+cdsapi
+geopandas
+httpx
+matplotlib
+netCDF4
+rioxarray
+pandas
+rich
+ipywidgets
+jupyterlab
+pyarrow
+black
+pyreadstat
+pytz
