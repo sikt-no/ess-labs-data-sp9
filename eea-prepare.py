@@ -66,7 +66,6 @@ def calculate_index_variables(df_in):
             pd.cut(df_in[name], bins, labels=False) if name in df_in.columns else np.nan
         )
 
-    # https://docs.google.com/document/d/1g4cxqQepVZC-5NtJ4lj4U2vrlNmf9xBR/edit
     indices = pd.DataFrame(
         {
             "aqiwdpm10": _bin_var("PM10", [0, 20, 40, 50, 100, 150, 1200]),
