@@ -8,22 +8,19 @@ import pyreadstat
 import pytz
 from rich.progress import track
 
-from utils import ERA5_PATH, ERA5_VARIABLE_VALUES, REGIONS, TIMEZONES
+from utils import ERA5_PATH, TMP_PATH, ERA5_VARIABLE_VALUES, REGIONS, TIMEZONES
 
 
 def create_date_column(df):
-    print(df)
-    epoch = pd.Timestamp(
-        year=1900, month=1, day=1, hour=12, tzinfo=pytz.timezone("utc")
-    )
-    df["timestamp"] = pd.to_timedelta(df["time"], unit="hours") + epoch
+    # make time variable timezone aware
+    df["time"] = df["time"].dt.tz_localize(pytz.utc)
     df["date"] = pd.Series(dtype="object")
     for region_id, tz_name in TIMEZONES.items():
         df["date"] = df["date"].mask(
             cond=df["region"] == region_id,
-            other=df["timestamp"].dt.tz_convert(tz_name).dt.date,
+            other=df["time"].dt.tz_convert(tz_name).dt.date,
         )
-    df = df.drop(columns=["time", "timestamp"])
+    df = df.drop(columns=["time"])
     return df
 
 
@@ -34,6 +31,9 @@ def fix_measurements(df):
 
 
 def groupby_date(df_in: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate grid-based daily values
+    """
     daily_grouper = df_in.groupby(["region", "grid_id", "date"])
     df = pd.DataFrame(
         {
@@ -59,7 +59,7 @@ def calculating_moving_averages(df):
         {
             "tmpdcaw": groupby["tmpdca"].rolling("7D").mean(),
             "tmpdcam": groupby["tmpdca"].rolling("30D").mean(),
-            "tmpdca3m": groupby["tmpdca"].rolling("90D").sum(),
+            "tmpdca3m": groupby["tmpdca"].rolling("90D").mean(),
             "tmpdcay": groupby["tmpdca"].rolling("365D").mean(),
             "pacctaw": groupby["paccta"].rolling("7D").sum(),
             "pacctam": groupby["paccta"].rolling("30D").sum(),
@@ -83,14 +83,14 @@ def calculating_anomalies(df_in):
     df = df_in.reset_index()
     df["cal_month"] = df["date"].apply(lambda val: val.month)
     df["year_month"] = df["date"].apply(lambda val: f"{val.year}-{val.month}")
-    df_baseline = df[df["date"].apply(lambda val: 1991 >= val.year <= 2020)]
-    cal_month_groupby = df_baseline.groupby("cal_month")["tmpdca"]
+    df_baseline = df[df["date"].apply(lambda val: 1991 <= val.year <= 2020)]
+    tmp_cal_month_groupby = df_baseline.groupby("cal_month")["tmpdca"]
 
-    tmpdcamb = cal_month_groupby.aggregate("mean")
+    tmpdcamb = tmp_cal_month_groupby.aggregate("mean")
     tmpdcamb.name = "tmpdcamb"
     df = df.join(tmpdcamb, on="cal_month")
 
-    tmp95pacmb = cal_month_groupby.aggregate(partial(np.percentile, q=95))
+    tmp95pacmb = tmp_cal_month_groupby.aggregate(partial(np.percentile, q=95))
     tmp95pacmb.name = "tmp95pacmb"
     df = df.join(tmp95pacmb, on="cal_month")
 
@@ -101,15 +101,22 @@ def calculating_anomalies(df_in):
     df["tmpdcacm"] = df.groupby("year_month")["tmpdca"].transform("mean")
     df["tmpanocm"] = df["tmpdcacm"] - df["tmpdcamb"]
 
-    pacctmb = cal_month_groupby.aggregate("mean")
+    # paccta
+    # sum daily to year_monthly first
+    df["pacctcm"] = df.groupby("year_month")["paccta"].transform("sum")
+    df_baseline["pacctcm"] = df_baseline.groupby("year_month")["paccta"].transform(
+        "sum"
+    )
+    # calculate monthly for baseline, join back in
+    pac_cal_month_groupby = df_baseline.groupby("cal_month")["pacctcm"]
+    pacctmb = pac_cal_month_groupby.aggregate("mean")
     pacctmb.name = "pacctmb"
     df = df.join(pacctmb, on="cal_month")
-
-    df["pacctcm"] = df.groupby("year_month")["tmpdca"].transform("mean")
-
+    # anomalies
     df["paccdcm"] = (df["pacctcm"] / df["pacctmb"]) * 100
 
-    iwg10mxamb = cal_month_groupby.aggregate("mean")
+    iwg_cal_month_groupby = df_baseline.groupby("cal_month")["iwg10mx"]
+    iwg10mxamb = iwg_cal_month_groupby.aggregate("mean")
     iwg10mxamb.name = "iwg10mxamb"
     df = df.join(iwg10mxamb, on="cal_month")
 
@@ -209,13 +216,15 @@ def do_for_region(region_id, path):
 
     daily_merged = pd.concat([daily, averages, anomalies], axis=1).reset_index()
 
-    # Remove 2015 data, which is only needed to caclucate the averages
+    daily_merged = order_columns(daily_merged)
+
+    # strip off the first year (not enough data for the rolling averages)
+    # and the last year (which only exists because of the timezone shift from 2022-12-31:23 -> 2023-01-01:00
     daily_merged = daily_merged[
-        daily_merged["date"].apply(lambda val: val.year >= 2016)
+        daily_merged["date"].apply(lambda val: 1991 <= val.year <= 2022)
     ]
 
-    daily_merged = order_columns(daily_merged)
-    save_path = f"tmp/{region_id}.pqt"
+    save_path = TMP_PATH / (region_id + ".pqt")
     daily_merged.to_parquet(save_path)
     return save_path
 
@@ -230,11 +239,23 @@ def main() -> pd.DataFrame:
     path = ERA5_PATH / "era5-grids.pqt"
     region_df_paths = [do_for_region(region_id, path) for region_id in track(REGIONS)]
     region_dfs = [pd.read_parquet(path) for path in region_df_paths]
+
+    print("concat")
     regions = pd.concat(region_dfs)
     check_labeled(regions)
-    regions.to_parquet(ERA5_PATH / "era5-regions.pqt", index=False)
+    regions.to_parquet(ERA5_PATH / "era5-regions-full_timeseries.pqt", index=False)
+
     pyreadstat.write_sav(
         df=regions,
+        dst_path=ERA5_PATH / "era5-regions-full_timeseries.sav",
+        column_labels=ERA5_VARIABLE_VALUES,
+    )
+
+    # Remove 2015 data, which is only needed to caclucate the averages
+    regions_cut = regions[regions["date"].apply(lambda val: val.year >= 2016)]
+    regions_cut.to_parquet(ERA5_PATH / "era5-regions.pqt", index=False)
+    pyreadstat.write_sav(
+        df=regions_cut,
         dst_path=ERA5_PATH / "era5-regions.sav",
         column_labels=ERA5_VARIABLE_VALUES,
     )

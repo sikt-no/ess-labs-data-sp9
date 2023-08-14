@@ -3,15 +3,15 @@ from pathlib import Path
 
 import cdsapi
 import geopandas
-import netCDF4
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from rich.progress import track
 import shapely
+import xarray as xr
 
-from utils import ERA5_PATH, GLOBAL_POP_FILE, REGIONS, load_geostat, load_nuts
+from utils import ERA5_PATH, GLOBAL_POP_FILE, REGIONS, TMP_PATH, load_geostat, load_nuts
 
 MONTHS = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"]
 
@@ -62,21 +62,27 @@ era5_cols = {
     "iwg10": "i10fg",
 }
 
+cds_client = cdsapi.Client()
+
 
 def download_era5(era5_id: str, region_id, region_geometry, year: str, month) -> Path:
     path = ERA5_PATH / "raw" / f"{era5_id}{region_id}y{year}m{month}.netcdf"
+    Path(ERA5_PATH / "raw").mkdir(exist_ok=True)
     if path.exists():
         return path
-    c = cdsapi.Client()
 
-    res = c.retrieve(
+    bounds = [region_geometry.bounds[i] for i in [3, 0, 1, 2]]  # N, W, S, E
+    padding = [1.0, -1.0, -1.0, 1.0]
+
+    area = [x + y * HALF_STEP for x, y in zip(bounds, padding)]
+    res = cds_client.retrieve(
         "reanalysis-era5-single-levels",
         {
             "product_type": "reanalysis",
             "format": "netcdf",
             "variable": era5_variables[era5_id],
             "grid": f"{STEP}/{STEP}",
-            "area": region_geometry.bounds,  # N, W, S, E
+            "area": area,  # N, W, S, E
             "year": year,
             "month": month,
             "day": DAYS,
@@ -90,16 +96,10 @@ def download_era5(era5_id: str, region_id, region_geometry, year: str, month) ->
 
 def read_netcdf(era5_id, filepath: Path) -> pd.DataFrame:
     col = era5_cols[era5_id]
-    ds = netCDF4.Dataset(str(filepath))
-    A = ds[col]
-    arranged = [ds[dim][:] for dim in A.dimensions]
-    grids = np.meshgrid(*arranged)
-    indices = np.stack([grid.flatten() for grid in grids], axis=1)
-    df = pd.DataFrame(indices, columns=A.dimensions)
-    df[era5_id] = np.asarray(A).flatten()
-    df = df.rename(columns={"longitude": "latitude", "latitude": "longitude"})  # HM!
-    df = df.set_index(["time", "longitude", "latitude"]).sort_index()
-    df = df.astype("float32")
+    ncx = xr.open_dataset(str(filepath))
+    df = ncx[col].to_dataframe()
+    ncx.close()
+    df = df.rename(columns={col: era5_id})
     return df
 
 
@@ -112,7 +112,7 @@ def make_month_df(region_id, region_geometry, year, month):
         month_measure_df = read_netcdf(era5_id, month_filepath)
         month_measure_dfs.append(month_measure_df)
     df = pd.concat(month_measure_dfs, axis=1).reset_index()
-    df["time"] = df["time"].astype("int32")
+    # df["time"] = df["time"].astype("int32")
     df["longitude"] = df["longitude"].astype("float32")
     df["latitude"] = df["latitude"].astype("float32")
     df["tmpdc"] = df["tmpdc"].astype("float32")
@@ -159,7 +159,8 @@ def merge_population_data(df_in, region_df) -> pd.Series:
 
 
 def make_region_grids_table(nuts_df, region_id: str) -> pa.Table:
-    path = f"tmp/tmp{region_id}era5.pqt"
+    path = TMP_PATH / f"tmp{region_id}era5.pqt"
+
     print(f"make_region_month_df {region_id}")
     region_df = nuts_df[nuts_df["NUTS_ID"] == region_id]
     assert len(region_df) == 1, region_df
@@ -169,6 +170,7 @@ def make_region_grids_table(nuts_df, region_id: str) -> pa.Table:
         make_month_df(region_id, region_geometry, year, month)
         for year, month in track(list(product(YEARS, MONTHS)))
     ]
+
     df = pd.concat(month_dfs)
     df["region"] = region_id
     df["grid_id"] = df.groupby(["longitude", "latitude"]).ngroup()
@@ -189,8 +191,11 @@ def main():
         for region_id in REGIONS
     ]
     region_tables = [pq.read_table(path) for path in region_table_paths]
+
+    print("Concat region tables")
     table = pa.concat_tables(region_tables)
     path = ERA5_PATH / "era5-grids.pqt"
+    print("save")
     pq.write_table(table, path)
 
 

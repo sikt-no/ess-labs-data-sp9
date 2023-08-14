@@ -7,6 +7,8 @@ from rich.progress import track
 import rioxarray as rxr
 from shapely.geometry import LineString
 
+from config import EEA_PATH, ERA5_PATH, TMP_PATH, GLOBAL_POP_FILE, NUTS_PATH
+
 REGIONS = [
     "AT13",
     "BE10",
@@ -44,15 +46,9 @@ ESS_FILES = [
 ]
 
 
-EEA_PATH = Path("eea_data")
-ERA5_PATH = Path("era5_data")
-TMP_PATH = Path("tmp")
-for path in [EEA_PATH, ERA5_PATH, TMP_PATH]:
-    path.mkdir()
-
-
-# FIXME path
-GLOBAL_POP_FILE = "/home/ebs/Downloads/GHS_POP_E2020_GLOBE_R2022A_54009_1000_V1_0/GHS_POP_E2020_GLOBE_R2022A_54009_1000_V1_0.tif"
+for path in [EEA_PATH, ERA5_PATH, TMP_PATH, NUTS_PATH]:
+    if not path.exists():
+        path.mkdir()
 
 
 async def a_maybe_download(url, folder=None):
@@ -87,10 +83,11 @@ def make_path(url, folder):
     return path
 
 
-def load_nuts():
+def load_nuts(folder=NUTS_PATH):
     def make_level_df(level, year):
         url = f"https://gisco-services.ec.europa.eu/distribution/v2/nuts/geojson/NUTS_RG_01M_{year}_4326_LEVL_{level}.geojson"
-        path = maybe_download(url)
+        path = maybe_download(url, folder)
+
         cols = ["NUTS_ID", "LEVL_CODE", "CNTR_CODE", "geometry"]
         level_df = geopandas.read_file(path).set_index("id")[cols]
         return level_df
