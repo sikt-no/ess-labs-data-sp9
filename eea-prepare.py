@@ -66,13 +66,14 @@ def calculate_index_variables(df_in):
             pd.cut(df_in[name], bins, labels=False) if name in df_in.columns else np.nan
         )
 
+    # use infinity to get infinite upper bounds
     indices = pd.DataFrame(
         {
-            "aqiwdpm10": _bin_var("PM10", [0, 20, 40, 50, 100, 150, 1200]),
-            "aqiwdpm2_5": _bin_var("PM2.5", [0, 10, 20, 25, 50, 75, 800]),
-            "aqiwdso2": _bin_var("SO2", [0, 100, 200, 350, 500, 750, 1250]),
-            "aqiwdno2": _bin_var("NO2", [0, 40, 90, 120, 230, 340, 1000]),
-            "aqiwdo3": _bin_var("O3", [0, 50, 100, 130, 240, 380, 800]),
+            "aqiwdpm10": _bin_var("PM10", [0, 20, 40, 50, 100, 150, np.inf]),
+            "aqiwdpm2_5": _bin_var("PM2.5", [0, 10, 20, 25, 50, 75, np.inf]),
+            "aqiwdso2": _bin_var("SO2", [0, 100, 200, 350, 500, 750, np.inf]),
+            "aqiwdno2": _bin_var("NO2", [0, 40, 90, 120, 230, 340, np.inf]),
+            "aqiwdo3": _bin_var("O3", [0, 50, 100, 130, 240, 380, np.inf]),
         }
     )
 
